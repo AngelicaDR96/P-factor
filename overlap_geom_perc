@@ -1,0 +1,102 @@
+import numpy as np
+import geopandas as gpd
+import rasterio
+from rasterio.features import rasterize
+
+def calculate_overlap_percentage(raster_path, shapefile_path, output_raster_path):
+
+""" calculate the percentage of overlapping geometries """
+
+    # Load vector data
+    gdf = gpd.read_file(shapefile_path)
+    gdf['geometry'] = gdf['geometry'].apply(lambda x: x.buffer(0))  # Fix invalid geometries
+
+    with rasterio.open(raster_path) as src:
+        raster_meta = src.meta.copy()
+        transform = src.transform
+        crs = src.crs
+        width = src.width
+        height = src.height
+        pixel_width = transform.a
+        pixel_height = -transform.e  # Usually negative
+        pixel_area = pixel_width * pixel_height
+
+        # Reproject vector to match raster CRS
+        if gdf.crs != crs:
+            gdf = gdf.to_crs(crs)
+
+        # Prepare output array
+        overlap_array = np.zeros((height, width), dtype=np.float32)
+
+        # Loop through each geometry
+        for geom in gdf.geometry:
+            if geom.is_empty or not geom.is_valid:
+                continue
+
+            # Rasterize geometry, touching all intersecting pixels
+            mask = rasterize(
+                [(geom, 1)],
+                out_shape=(height, width),
+                transform=transform,
+                fill=0,
+                all_touched=True,
+                dtype='uint8'
+            )
+
+            rows, cols = np.where(mask == 1)
+
+            # Use mask to add full-pixel coverage to overlap_array
+            # overlap_array += mask.astype(np.float32) * 100
+
+            # Iterate over pixels that intersect the geometry's bbox
+            for row, col in zip(rows, cols):
+                pixel_bounds = bounds(rasterio.windows.Window(col, row, 1, 1), transform)
+                pixel_polygon = box(*pixel_bounds).buffer(0)  # Ensure valid polygon
+                print(f"Processing pixel at row {row}, col {col}")
+
+                if not pixel_polygon.intersects(geom):
+                    print(f"No pixel at row {row}, col {col}")
+                    continue
+
+                intersection = pixel_polygon.intersection(geom)
+                print(intersection)
+                if intersection.is_empty:
+                    print(f"Empty intersection at row {row}, col {col}")
+                    continue
+
+                overlap = (intersection.area / pixel_area)
+                overlap_array[row, col] += overlap  # accumulate if multiple geometries overlap
+
+        # Update metadata
+        raster_meta.update(dtype='float32', count=1)
+
+        with rasterio.open(output_raster_path, 'w', **raster_meta) as dest:
+            dest.write(overlap_array, 1)
+
+
+### Calculate ###
+
+input_folder = r"\\192.168.100.4\r_d\r_d_GIS\commesse esterne\MASE_SIM\v2.4\AGEA_\P-factor\prova"
+
+ras_path = os.path.join(input_folder, "slope_L_bbox.tif")
+vect_path = os.path.join(input_folder, "gdf_clean_bbox.csv")
+vect_shp_path = os.path.join(input_folder, "gdf_clean_bbox.gpkg")
+
+raster = rasterio.open(ras_path)
+slope = raster.read(1)
+L = raster.read(2)
+
+vector = pd.read_csv(vect_path, sep=';')
+# Convert WKT string to shapely geometries
+vector['geometry'] = vector['WKT'].apply(wkt.loads)
+# Convert to GeoDataFrame
+vector = gpd.GeoDataFrame(vector, geometry='geometry')
+# Set CRS (you MUST know it — e.g., EPSG:4326 or match the raster)
+vector.set_crs("EPSG:3035", inplace=True)  # adjust if needed
+
+
+calculate_overlap_percentage(
+    raster_path= ras_path,
+    shapefile_path= vect_shp_path,
+    output_raster_path= os.path.join(input_folder, "overlap.gpkg")
+)
